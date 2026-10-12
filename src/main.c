@@ -350,7 +350,6 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT wMsg, WPARAM wParam, LPARAM lPar
 						TreeView_DeleteAllItems(mytreeviewparam.hwndTV);
 						ListView_DeleteAllItems(mylistviewparam.hwndLV);
 						StopPvi();
-						Sleep(1000);
 						StartPvi();
 						SetCursor(oldcursor);
 					}
