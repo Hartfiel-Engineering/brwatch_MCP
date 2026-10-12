@@ -48,6 +48,7 @@ C_SOURCES = \
 	mylistview.c \
 	mytreeview.c \
 	pvi_interface.c \
+	report.c \
 	resource.c \
 	settings.c \
 	stringtools.c \

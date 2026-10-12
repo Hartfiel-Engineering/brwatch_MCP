@@ -12,6 +12,7 @@ Module   : pvi_interface.c
 #include "cpusearch.h"
 #include "stringtools.h"
 #include "logger.h"
+#include "report.h"
 
 
 #define PVILOGFILE "pvilog.txt"
@@ -73,9 +74,7 @@ static void ReadSettings(void) {
 
 	deviceObject = calloc( MAX_SUPPORTED_DEVICES, sizeof(PVIOBJECT));
 	if( deviceObject == NULL) {
-		char tempstring[256];
-		snprintf( tempstring, sizeof(tempstring), "Out of memory !" );
-		MessageBox( MainWindowGetHandle(), tempstring, "Reading *.ini file", MB_OK );
+		ReportError( REPORT_ERROR, "Reading *.ini file", "Out of memory !" );
 		return;
 	}
 
@@ -122,9 +121,7 @@ static void ReadSettings(void) {
 	}
 
 	if( numberOfDevices == 0 ) {
-		char tempstring[256];
-		snprintf( tempstring, sizeof(tempstring), "No PVI devices (interfaces) configured in .ini file !" );
-		MessageBox( MainWindowGetHandle(), tempstring, "Reading *.ini file", MB_OK );
+		ReportError( REPORT_ERROR, "Reading *.ini file", "No PVI devices (interfaces) configured in .ini file !" );
 		return;
 	}
 
@@ -166,9 +163,7 @@ static void ReadSettings(void) {
 	}
 	
 	if( numberOfCpus == 0 ) {
-		char tempstring[256];
-		snprintf( tempstring, sizeof(tempstring), "No CPUs configured in .ini file !" );
-		MessageBox( MainWindowGetHandle(), tempstring, "Reading *.ini file", MB_OK );
+		ReportError( REPORT_ERROR, "Reading *.ini file", "No CPUs configured in .ini file !" );
 		return;
 	}
 
@@ -711,7 +706,7 @@ static void CALLBACK PviCyclicRequests( HWND hwnd, UINT uMsg, UINT idEvent, DWOR
 	if( zyklus_getlicenseinfo < 10) {
 		if( ++zyklus_getlicenseinfo >= 10 ) {
 			if( GetPviLicenceInfo() == PVIWORK_STATE_LOCKED ) {
-				MessageBox( MainWindowGetHandle(), "Sorry PVI is locked.\nProgram must shut down !", "Error Pvi License", MB_ICONERROR );
+				ReportError( REPORT_ERROR, "Error Pvi License", "Sorry PVI is locked.\nProgram must shut down !" );
 				SendMessage( MainWindowGetHandle(), WM_CLOSE, 0, 0 );
 			} else {
 				zyklus_getlicenseinfo = 0;
@@ -1159,11 +1154,11 @@ static PVIOBJECT *PviReadCPUList(PVIOBJECT *deviceObject ) {
 			}
 			switch( result ) {
 				case 4808:
-					MessageBox( NULL, "No CPU found !", "Error", MB_OK | MB_ICONEXCLAMATION );
+					ReportError( REPORT_WARN, "Error", "No CPU found !" );
 					break;
 
 				case 13076:
-					MessageBox( NULL, "Device does not exist !", "Error", MB_OK | MB_ICONEXCLAMATION );
+					ReportError( REPORT_WARN, "Error", "Device does not exist !" );
 					break;
 
 
@@ -1752,7 +1747,6 @@ static void AddRowToLog(char *row, int errcode) {
 	FILE *f;
 	char zeit[10];
 	char datum[10];
-	char *pmessage;
 	char filename[MAX_PATH];
 
 	strcpy( filename, GetApplicationPath() );
@@ -1774,23 +1768,17 @@ static void AddRowToLog(char *row, int errcode) {
 
 	if (errcode != 0) {
 		char *errtext;
-		pmessage = (char *)malloc(512);
-
-		if (pmessage != NULL) {
-			switch( errcode ) {
-				case 12050:
-					errtext = "PVI-Manager not startet";
-					break;
-				case 12060:
-					errtext = "process timeout";
-					break;
-				default:
-					errtext = "please refer to PVI documentation";
-			}
-			sprintf(pmessage, "Error in PVI-Interface\nError: %u\n\"%s\"\n(%s)", errcode, errtext, row  );
-			MessageBox(NULL, pmessage, "Error", MB_OK | MB_ICONERROR);
+		switch( errcode ) {
+			case 12050:
+				errtext = "PVI-Manager not startet";
+				break;
+			case 12060:
+				errtext = "process timeout";
+				break;
+			default:
+				errtext = "please refer to PVI documentation";
 		}
-		free(pmessage);
+		ReportError( REPORT_ERROR, "Error", "Error in PVI-Interface\nError: %u\n\"%s\"\n(%s)", errcode, errtext, row );
 	}
 
 }
@@ -1950,8 +1938,7 @@ int LoadPviObjectsFromWatchFile(T_POBJ_TYPE typefilter, char *filename) {
 	GetPrivateProfileString(section, section, "0", tempstring, sizeof(tempstring), filename);
 	entries = atoi(tempstring);
 	if (entries == 0) {
-		sprintf(tempstring, "No entries found in section [%s] !", section);
-		MessageBox(NULL, tempstring, "Error Loading Watch File", MB_OK | MB_ICONERROR);
+		ReportError( REPORT_ERROR, "Error Loading Watch File", "No entries found in section [%s] !", section );
 		return -1;
 	}
 	for (i = 1; i <= entries; ++i) {
@@ -1962,16 +1949,14 @@ int LoadPviObjectsFromWatchFile(T_POBJ_TYPE typefilter, char *filename) {
 		sprintf(keyname, "name%u", i);
 		GetPrivateProfileString(section, keyname, "", tempobject.name, sizeof(tempobject.name), filename);
 		if (strlen(tempobject.name) == 0) {
-			sprintf(tempstring, "section [%s]\n%s=\ninvalid or not found !", section, keyname);
-			MessageBox(NULL, tempstring, "Error Loading Watch File", MB_OK | MB_ICONERROR);
+			ReportError( REPORT_ERROR, "Error Loading Watch File", "section [%s]\n%s=\ninvalid or not found !", section, keyname );
 			return -1;
 		}
 		// read descriptor
 		sprintf(keyname, "desc%u", i);
 		GetPrivateProfileString(section, keyname, "", tempobject.descriptor, sizeof(tempobject.descriptor), filename);
 		if (strlen(tempobject.descriptor) == 0) {
-			sprintf(tempstring, "section [%s]\n%s=\ninvalid or not found !", section, keyname);
-			MessageBox(NULL, tempstring, "Error Loading Watch File", MB_OK | MB_ICONERROR);
+			ReportError( REPORT_ERROR, "Error Loading Watch File", "section [%s]\n%s=\ninvalid or not found !", section, keyname );
 			return -1;
 		}
 		// read sort criteria

@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN  /* speed up compilations */
 #include "main.h"
+#include "report.h"
 
 #define INIFILE 				"brwatch.ini"
 
@@ -33,10 +34,8 @@ void SettingsInitialize(void) {
 				if( (p=LockResource(hglobal)) != NULL ) {
 					if( (file = fopen( inifile, "wb+" )) != NULL ) {
 						if( fwrite( p, 1, length, file ) == length ) {
-							char tempstring[256];
 							inifile_exist = TRUE;
-							snprintf( tempstring, sizeof(tempstring), "The settings were not found.\n%s\nwas created !", inifile );
-							MessageBox( MainWindowGetHandle(), tempstring, "Create *.ini file", MB_OK );
+							ReportError( REPORT_INFO, "Create *.ini file", "The settings were not found.\n%s\nwas created !", inifile );
 						} else {
 							perror(errorMessage);
 						}
@@ -54,9 +53,7 @@ void SettingsInitialize(void) {
 	}
 
 	if( inifile_exist == FALSE ) {
-		char tempstring[256];
-		snprintf( tempstring, sizeof(tempstring), "Error creating *.ini file !\n%s", errorMessage );
-		MessageBox( MainWindowGetHandle(), tempstring, "Error!", MB_OK | MB_ICONERROR );
+		ReportError( REPORT_ERROR, "Error!", "Error creating *.ini file !\n%s", errorMessage );
 	}
 
 }
@@ -76,7 +73,7 @@ BOOL CALLBACK  SettingsDlg(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 
 			buf = malloc(32768);
 			if( buf == NULL ) {
-				MessageBox( MainWindowGetHandle(), "To less memory !", "Error", MB_OK | MB_ICONERROR );
+				ReportError( REPORT_ERROR, "Error", "To less memory !" );
 				return FALSE;
 			}
 
@@ -89,15 +86,13 @@ BOOL CALLBACK  SettingsDlg(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 					free(buf);
 					fclose(file);
 				} else if( ferror(file) ) {
-					sprintf( buf, "Error reading %s !", SettingsGetFileName() );
-					MessageBox( MainWindowGetHandle(), buf, "Error", MB_OK | MB_ICONERROR );
+					ReportError( REPORT_ERROR, "Error", "Error reading %s !", SettingsGetFileName() );
 					free(buf);
 					fclose(file);
 					return FALSE;
 				}
 			} else {
-				sprintf( buf, "Could not open %s !", SettingsGetFileName() );
-				MessageBox( MainWindowGetHandle(), buf, "Error", MB_OK | MB_ICONERROR );
+				ReportError( REPORT_ERROR, "Error", "Could not open %s !", SettingsGetFileName() );
 				free(buf);
 				fclose(file);
 				return FALSE;
@@ -131,7 +126,7 @@ BOOL CALLBACK  SettingsDlg(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 							return TRUE;
 						}
 					}
-					MessageBox( MainWindowGetHandle(), "Could not save the settings", "Error", MB_OK | MB_ICONERROR );
+					ReportError( REPORT_ERROR, "Error", "Could not save the settings" );
 				}
 				// weiter wie bei IDCANCEL...
 

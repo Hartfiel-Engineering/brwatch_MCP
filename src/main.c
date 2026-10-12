@@ -12,6 +12,7 @@
 #include "dlg_about.h"
 #include "dlg_showpviobjects.h"
 #include "compressfile.h"
+#include "report.h"
 #include "resource.h"
 #include <wingdi.h>
 
@@ -109,7 +110,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	// save application path
 	if (GetCurrentDirectory(sizeof(application_path), application_path)) {
 	} else {
-		MessageBox( NULL, "GetCurrentDirectory", "Error", MB_OK );
+		ReportError( REPORT_ERROR, "Error", "GetCurrentDirectory" );
 		return -1;
 	}
 
@@ -703,7 +704,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT wMsg, WPARAM wParam, LPARAM lPar
 			// }
 
 			if (StartPvi())
-				MessageBox(g_hwndMainWindow, "Error during PVI initialization.\nssee log file !", "Error", MB_OK);
+				ReportError( REPORT_ERROR, "Error", "Error during PVI initialization.\nssee log file !" );
 			EnableMenuItem( GetMenu(hWnd), IDM_LOGGER_UNZIPLOGGERFILE, MF_ENABLED );
 			
 			return (0);

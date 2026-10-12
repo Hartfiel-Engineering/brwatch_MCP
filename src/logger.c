@@ -12,6 +12,7 @@
 #include "pvi_interface.h"
 #include "logger.h"
 #include "compressfile.h"
+#include "report.h"
 
 #include "resource.h"
 
@@ -141,22 +142,22 @@ static void ReadSettings( void ) {
 static BOOL ValidateSettings( void ) {
 
 	if( filesize < 1 ) {
-		MessageBox( MainWindowGetHandle(), "filesize at least 1 kByte !", "Logger Error - Wrong size", MB_OK | MB_ICONERROR );
+		ReportError( REPORT_ERROR, "Logger Error - Wrong size", "filesize at least 1 kByte !" );
 		return FALSE;
 	}
 
 	if( cycletime < 50 ) {
-		MessageBox( MainWindowGetHandle(), "cycletime must not below 50 ms !", "Logger Error - Wrong cycletime", MB_OK | MB_ICONERROR );
+		ReportError( REPORT_ERROR, "Logger Error - Wrong cycletime", "cycletime must not below 50 ms !" );
 		return FALSE;
 	}
 
 	if( cpu_timemaster == NULL ) {
-		MessageBox( MainWindowGetHandle(), "no cpu for timestamp found !", "Logger Error - No Timestamp- CPU", MB_OK | MB_ICONERROR );
+		ReportError( REPORT_ERROR, "Logger Error - No Timestamp- CPU", "no cpu for timestamp found !" );
 		return FALSE;
 	}
 
 	if( CountLoggedObjects() == 0 ) {
-		MessageBox( MainWindowGetHandle(), "no objects to log !", "Logger Error - No Objects", MB_OK | MB_ICONERROR );
+		ReportError( REPORT_ERROR, "Logger Error - No Objects", "no objects to log !" );
 		return FALSE;
 	}
 
@@ -205,6 +206,87 @@ BOOL CreateBackupFilename( LPTSTR oldfilename, LPTSTR renamedfilename ) {
 	return TRUE;
 }
 
+
+
+/* Append the leading separator and the current PV value to the CSV file.
+   Returns fprintf's byte count (>=0) or <0 on write error.
+   Shared by LoggerDataChanged (',' separator) and TimerProc (';' separator). */
+
+static int FormatPvValueCsv( FILE *f, PVIOBJECT *object, char sep ) {
+	switch( object->ex.pv.type ) {
+		case BR_USINT:
+			return fprintf( f, "%c%u", sep, * ( (unsigned char*) object->ex.pv.pvalue ) );
+
+		case BR_SINT:
+			return fprintf( f, "%c%+i", sep, * ( (signed char*) object->ex.pv.pvalue ) );
+
+		case BR_UINT:
+			return fprintf( f, "%c%u", sep, * ( (unsigned short*) object->ex.pv.pvalue ) );
+
+		case BR_INT:
+			return fprintf( f, "%c%+i", sep, * ( (signed short*) object->ex.pv.pvalue ) );
+
+		case BR_DATI:
+		case BR_UDINT:
+		case BR_TIME:
+		case BR_TOD:
+		case BR_DATE:
+			return fprintf( f, "%c%u", sep, * ( (unsigned int*) object->ex.pv.pvalue ) );
+
+		case BR_DINT:
+			return fprintf( f, "%c%+i", sep, * ( (signed int*) object->ex.pv.pvalue ) );
+
+		case BR_BOOL:
+			return fprintf( f, "%c%.1u", sep, * ( (unsigned char*) object->ex.pv.pvalue ) );
+
+		case BR_REAL: {
+			float real = * ((float*) object->ex.pv.pvalue );
+			return fprintf( f, "%c%g", sep, real );
+		}
+
+		case BR_LREAL: {
+			double lreal = * ((double*) object->ex.pv.pvalue );
+			return fprintf( f, "%c%g", sep, lreal );
+		}
+
+		case BR_STRING:
+			if( object->ex.pv.pvalue != NULL ) {
+				char *s;
+				char *d;
+				char value[256];
+				int count = 0;
+				s = (char*) object->ex.pv.pvalue;
+				d = value;
+				while( *s && (count < (int)sizeof(value)) ) {
+					if( (*s & 0xff) < ' ' ) {
+						sprintf( d, "\\x%3.3x", (*s & 0xff) );
+						d+=5;
+						++s;
+						count += 5;
+					} else {
+						++count;
+						if( object->gui_info.interpret_as_oem ) {
+							OemToCharBuff( s++, d++, 1 );
+						} else {
+							*d++=*s++;
+						}
+					}
+				}
+				*d = 0;
+				return fprintf( f, "%c\"%.120s\"", sep, value );
+			}
+			return 0;
+
+		case BR_WSTRING:
+			if( object->ex.pv.pvalue != NULL ) {
+				return fwprintf( f, L"%c\"%.120s\"", sep, object->ex.pv.pvalue );
+			}
+			return 0;
+
+		default:
+			return 0;
+	}
+}
 
 
 /* is called by PVI callback when process variables have been changed */
@@ -350,92 +432,7 @@ void LoggerDataChanged( PVIOBJECT *object ) {
 							}
 
 							// Wert
-							switch( object->ex.pv.type ) {
-								case BR_USINT:
-									result = fprintf( f, ",%u", * ( (unsigned char*) object->ex.pv.pvalue ) );
-									break;
-
-								case BR_SINT:
-									result = fprintf( f, ",%+i", * ( (signed char*) object->ex.pv.pvalue ) );
-									break;
-
-								case BR_UINT:
-									result = fprintf( f, ",%u", * ( (unsigned short*) object->ex.pv.pvalue ) );
-									break;
-
-								case BR_INT:
-									result = fprintf( f, ",%+i", * ( (signed short*) object->ex.pv.pvalue ) );
-									break;
-
-								case BR_DATI:
-								case BR_UDINT:
-								case BR_TIME:
-								case BR_TOD:
-								case BR_DATE:
-									result = fprintf( f, ",%u", * ( (unsigned int*) object->ex.pv.pvalue ) );
-									break;
-
-								case BR_DINT:
-									result = fprintf( f, ",%+i", * ( (signed int*) object->ex.pv.pvalue ) );
-									break;
-
-								case BR_BOOL:
-									result = fprintf( f, ",%.1u", * ( (unsigned  char*) object->ex.pv.pvalue ) );
-									break;
-
-								case BR_REAL: {
-									float real = * ((float*) object->ex.pv.pvalue );
-									result = fprintf( f, ",%g", real );
-								}
-								break;
-
-								case BR_LREAL: {
-									double lreal = * ((double*) object->ex.pv.pvalue );
-									result = fprintf( f, ",%g", lreal );
-								}
-								break;
-
-
-								case BR_STRING:
-									if( object->ex.pv.pvalue != NULL ) {
-										char *s;
-										char *d;
-										char value[256];
-										int count = 0;
-										s = (char*) object->ex.pv.pvalue;
-										d = value;
-										while( *s && (count < sizeof(value)) ) {
-											if( (*s & 0xff) < ' ' ) {
-												sprintf( d, "\\x%3.3x", (*s & 0xff) );
-												d+=5;
-												++s;
-												count += 5;
-											} else {
-												++count;
-												if( object->gui_info.interpret_as_oem ) {
-													OemToCharBuff( s++, d++, 1 );
-												} else {
-													*d++=*s++;
-												}
-
-											}
-										}
-										*d = 0;
-										result = fprintf( f, ",\"%.120s\"", value );
-									}
-									break;
-
-
-								case BR_WSTRING:
-									if( object->ex.pv.pvalue != NULL ) {
-										fwprintf( f, L",\"%.120s\"", object->ex.pv.pvalue );
-									}
-									break;
-
-								default:
-									result = 0;
-									break;
-							}
+							result = FormatPvValueCsv( f, object, ',' );
 							if( result < 0 ) {
 								break;
 							} else {
@@ -494,7 +491,7 @@ void LoggerDataChanged( PVIOBJECT *object ) {
 					start_write_by_change = 0; // self stop
 					SendMessage( MainWindowGetHandle(), NOTIFY_LOGGER_STATUS, 0, 0 );
 					if( strcmp( errstring, "") ) {
-						MessageBox( NULL, errstring, APPLICATION_NAME " - Logger",  MB_OK | MB_ICONERROR );
+						ReportError( REPORT_ERROR, APPLICATION_NAME " - Logger", "%s", errstring );
 					}
 					break;
 
@@ -657,90 +654,7 @@ static VOID CALLBACK TimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwT
 
 				for( i=0; i< no_of_logged_objects; ++i ) {
 					if( logged_object[i]->type == POBJ_PVAR ) {
-						switch( logged_object[i]->ex.pv.type ) {
-							case BR_USINT:
-								result = fprintf( f, ";%u", * ( (unsigned char*) logged_object[i]->ex.pv.pvalue ) );
-								break;
-
-							case BR_SINT:
-								result = fprintf( f, ";%i", * ( (signed char*) logged_object[i]->ex.pv.pvalue ) );
-								break;
-
-							case BR_UINT:
-								result = fprintf( f, ";%u", * ( (unsigned short*) logged_object[i]->ex.pv.pvalue ) );
-								break;
-
-							case BR_INT:
-								result = fprintf( f, ";%+i", * ( (signed short*) logged_object[i]->ex.pv.pvalue ) );
-								break;
-
-							case BR_DATI:
-							case BR_UDINT:
-							case BR_TIME:
-							case BR_DATE:
-							case BR_TOD:
-								result = fprintf( f, ";%u", * ( (unsigned int*) logged_object[i]->ex.pv.pvalue ) );
-								break;
-
-							case BR_DINT:
-								result = fprintf( f, ";%+i", * ( (signed int*) logged_object[i]->ex.pv.pvalue ) );
-								break;
-
-							case BR_BOOL:
-								result = fprintf( f, ";%.1u", * ( (unsigned  char*) logged_object[i]->ex.pv.pvalue ) );
-								break;
-
-							case BR_REAL: {
-								float real = * ((float*) logged_object[i]->ex.pv.pvalue );
-								result = fprintf( f, ";%g", real );
-							}
-							break;
-
-							case BR_LREAL: {
-								double lreal = * ((double*) logged_object[i]->ex.pv.pvalue );
-								result = fprintf( f, ";%g", lreal );
-							}
-							break;
-
-							case BR_STRING:
-								if( logged_object[i]->ex.pv.pvalue != NULL ) {
-									char *s;
-									char *d;
-									char value[256];
-									int count = 0;
-									s = (char*) logged_object[i]->ex.pv.pvalue;
-									d = value;
-									while( *s && (count < sizeof(value)) ) {
-										if( (*s & 0xff) < ' ' ) {
-											sprintf( d, "\\x%3.3x", (*s & 0xff) );
-											d+=5;
-											++s;
-											count += 5;
-										} else {
-											++count;
-											if( logged_object[i]->gui_info.interpret_as_oem ) {
-												OemToCharBuff( s++, d++, 1 );
-											} else {
-												*d++=*s++;
-											}
-
-										}
-									}
-									*d = 0;
-									result = fprintf( f, ";\"%.120s\"", value );
-								}
-								break;
-								
-							case BR_WSTRING:
-								if( logged_object[i]->ex.pv.pvalue != NULL ) {
-									result = fwprintf( f, L";\"%.120s\"", logged_object[i]->ex.pv.pvalue );
-								}
-								break;
-
-							default:
-								result = 0;
-								break;
-						}
+						result = FormatPvValueCsv( f, logged_object[i], ';' );
 						if( result < 0 ) {
 							break;
 						} else {
@@ -805,7 +719,7 @@ static VOID CALLBACK TimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwT
 			logger_is_running = FALSE;
 			SendMessage( MainWindowGetHandle(), NOTIFY_LOGGER_STATUS, 0, 0 );
 			if( strcmp( errstring, "") ) {
-				MessageBox( NULL, errstring, APPLICATION_NAME " - Logger",  MB_OK | MB_ICONERROR );
+				ReportError( REPORT_ERROR, APPLICATION_NAME " - Logger", "%s", errstring );
 			}
 			break;
 
