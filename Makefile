@@ -30,6 +30,9 @@ CFLAGS   = -m32 -Wall -Wextra -I$(INC_DIR)
 LDFLAGS  = -m32 -mwindows -static-libgcc
 LIBS     = -lws2_32 -liphlpapi -lnetapi32 -lcomdlg32 -lgdi32 -luser32 -lkernel32 -lcomctl32 -L$(LIB_DIR) $(LIB_DIR)/PviCom.lib
 
+# SQLite build defines - lean, single-threaded, no extension loading
+SQLITE_CFLAGS = -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED
+
 # Resource
 RES      = $(BUILD_DIR)/brwatch_private.o
 
@@ -44,6 +47,7 @@ C_SOURCES = \
 	dlg_showpviobjects.c \
 	dlg_writepvar.c \
 	logger.c \
+	logger_db.c \
 	main.c \
 	mylistview.c \
 	mytreeview.c \
@@ -53,6 +57,10 @@ C_SOURCES = \
 	settings.c \
 	stringtools.c \
 	compressfile.c
+
+# SQLite sources (vendored amalgamation)
+SQLITE_SOURCES = \
+	sqlite3.c
 
 # zlib sources
 ZLIB_SOURCES = \
@@ -73,9 +81,10 @@ ZLIB_SOURCES = \
 	zutil.c
 
 # Object files
-C_OBJS   = $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
-ZLIB_OBJS = $(patsubst %.c,$(BUILD_DIR)/zlib/%.o,$(ZLIB_SOURCES))
-OBJS     = $(C_OBJS) $(ZLIB_OBJS)
+C_OBJS      = $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
+SQLITE_OBJS = $(patsubst %.c,$(BUILD_DIR)/sqlite/%.o,$(SQLITE_SOURCES))
+ZLIB_OBJS   = $(patsubst %.c,$(BUILD_DIR)/zlib/%.o,$(ZLIB_SOURCES))
+OBJS        = $(C_OBJS) $(SQLITE_OBJS) $(ZLIB_OBJS)
 
 # Rules
 .PHONY: all clean help
@@ -94,6 +103,7 @@ help:
 
 setup:
 	@if not exist "$(BUILD_DIR)" mkdir "$(BUILD_DIR)"
+	@if not exist "$(BUILD_DIR)\sqlite" mkdir "$(BUILD_DIR)\sqlite"
 	@if not exist "$(BUILD_DIR)\zlib" mkdir "$(BUILD_DIR)\zlib"
 
 clean:
@@ -112,6 +122,10 @@ $(BIN): setup $(OBJS) $(RES)
 # Pattern rule for object files from src/
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Pattern rule for object files from src/sqlite/ (relaxed warnings, SQLite-specific defines)
+$(BUILD_DIR)/sqlite/%.o: $(SRC_DIR)/sqlite/%.c
+	$(CC) -m32 -w -I$(INC_DIR) $(SQLITE_CFLAGS) -c $< -o $@
 
 # Pattern rule for object files from src/zlib/
 $(BUILD_DIR)/zlib/%.o: $(SRC_DIR)/zlib/%.c

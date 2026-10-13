@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "pvi_interface.h"
 #include "logger.h"
+#include "logger_db.h"
 #include "compressfile.h"
 #include "report.h"
 
@@ -27,11 +28,22 @@ extern int minigzip( int argc, char *argv[] );
 static BOOL zip_the_files;
 static BOOL write_by_change;
 static char loggerfile[MAX_PATH];
+static char sqlitefile[MAX_PATH];
 static int filesize;
 static int	cycletime;
 static BOOL logger_is_running=0;
 static BOOL start_write_by_change=0;
 static PVIOBJECT *cpu_timemaster=NULL;
+
+/* Returns UTC epoch milliseconds. Used for the SQLite timestamp column so DB
+   timestamps are directly correlatable across machines and runs. */
+static long long NowUtcMs( void ) {
+	FILETIME ft;
+	long long t;
+	GetSystemTimeAsFileTime( &ft );
+	t = ((long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+	return (t - 116444736000000000LL) / 10000LL;
+}
 
 #define START_LOGGING 10
 #define RENAME_OLD_FILE 20
@@ -100,6 +112,7 @@ static void ReadSettings( void ) {
 
 
 	GetPrivateProfileString( "Logger", "Filename", "C:\\temp\\logger.csv", loggerfile, sizeof(loggerfile), SettingsGetFileName() );
+	GetPrivateProfileString( "Logger", "SqliteFile", "", sqlitefile, sizeof(sqlitefile), SettingsGetFileName() );
 	filesize = GetPrivateProfileInt( "Logger", "maxfilesize", 10, SettingsGetFileName() );
 	cycletime = GetPrivateProfileInt( "Logger", "cycletime", 500, SettingsGetFileName() );
 	zip_the_files = GetPrivateProfileInt( "Logger", "zip", 0, SettingsGetFileName() );
@@ -444,6 +457,13 @@ void LoggerDataChanged( PVIOBJECT *object ) {
 					}
 					fprintf( f, "\n" );
 
+					if( LoggerDbIsOpen() && object != NULL && object->type == POBJ_PVAR ) {
+						long long pv_id = 0;
+						if( LoggerDbUpsertPv( object, &pv_id ) == 0 && pv_id > 0 ) {
+							LoggerDbWriteSample( pv_id, NowUtcMs(), object );
+						}
+					}
+
 					if( flushinterval > 10000 ) {			// flush file after a while
 						flushinterval = 0;
 						fflush(f);
@@ -665,6 +685,20 @@ static VOID CALLBACK TimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwT
 			}
 			fprintf( f, "\n" );
 
+			if( LoggerDbIsOpen() ) {
+				long long ts = NowUtcMs();
+				LoggerDbBeginBatch();
+				for( i = 0; i < no_of_logged_objects; ++i ) {
+					if( logged_object[i]->type == POBJ_PVAR ) {
+						long long pv_id = 0;
+						if( LoggerDbUpsertPv( logged_object[i], &pv_id ) == 0 && pv_id > 0 ) {
+							LoggerDbWriteSample( pv_id, ts, logged_object[i] );
+						}
+					}
+				}
+				LoggerDbCommitBatch();
+			}
+
 			if( flushinterval > 10000 ) {			// cyclically flush file
 				flushinterval = 0;
 				fflush(f);
@@ -853,12 +887,21 @@ BOOL Logger( void ) {
 				LoggerDataChanged( NULL );
 			}
 		}
+		if( LoggerDbIsOpen() ) {
+			LoggerDbEndRun();
+			LoggerDbClose();
+		}
 	} else {	// Logger wird gestartet;
 		ReadSettings();
 		CountLoggedObjects();
 		if( ValidateSettings() == FALSE )
 			logger_is_running = FALSE;  // could not be started
 		else {
+			if( sqlitefile[0] ) {
+				if( LoggerDbOpen(sqlitefile) == 0 ) {
+					LoggerDbBeginRun( write_by_change ? 0 : cycletime, loggerfile, NULL );
+				}
+			}
 			logger_is_running = TRUE;
 			logger_step = START_LOGGING;
 			if( write_by_change == 0) { // do not start timer procedure when 'write on change' is selected
