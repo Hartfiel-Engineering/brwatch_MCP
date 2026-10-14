@@ -28,6 +28,11 @@ BUILD_DIR = build
 # Compiler flags
 CFLAGS   = -m32 -Wall -Wextra -I$(INC_DIR)
 LDFLAGS  = -m32 -mwindows -static-libgcc
+# brwatch is a dual-mode binary (GUI when no args, CLI when subcommand args).
+# PE subsystem stays GUI (-mwindows) so double-click doesn't flash a console
+# window. The CLI path in cli.c explicitly AttachConsole(ATTACH_PARENT_PROCESS)
+# so stdout/stderr flow back to the launching cmd.exe. For MCP, Python
+# captures stdout via pipes - works regardless of subsystem.
 LIBS     = -lws2_32 -liphlpapi -lnetapi32 -lcomdlg32 -lgdi32 -luser32 -lkernel32 -lcomctl32 -L$(LIB_DIR) $(LIB_DIR)/PviCom.lib
 
 # SQLite build defines - lean, single-threaded, no extension loading
@@ -38,6 +43,7 @@ RES      = $(BUILD_DIR)/brwatch_private.o
 
 # Source files
 C_SOURCES = \
+	cli.c \
 	cpusearch.c \
 	dlg_about.c \
 	dlg_busy.c \

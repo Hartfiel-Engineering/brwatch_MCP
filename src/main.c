@@ -13,6 +13,7 @@
 #include "dlg_showpviobjects.h"
 #include "compressfile.h"
 #include "report.h"
+#include "cli.h"
 #include "resource.h"
 #include <wingdi.h>
 
@@ -112,6 +113,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	} else {
 		ReportError( REPORT_ERROR, "Error", "GetCurrentDirectory" );
 		return -1;
+	}
+
+	/* CLI branch: if command-line args name a known subcommand, run it
+	   headlessly and return the exit code. GUI never initializes. CliTryDispatch
+	   calls SettingsInitialize itself so the two paths don't double-init. */
+	{
+		int cli_exit = 0;
+		if( CliTryDispatch( lpCmdLine, hInstance, &cli_exit ) ) {
+			return cli_exit;
+		}
 	}
 
 	SettingsInitialize(); // ggf. Default- Ini kreieren
