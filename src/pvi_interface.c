@@ -2019,13 +2019,134 @@ int LoadPviObjectsFromWatchFile(T_POBJ_TYPE typefilter, char *filename) {
 }
 
 
-/* CLI helper: add a global PVAR to the watch list by CPU descriptor + var name.
-   Triggers PviReadPvarList on the CPU to populate all global PVARs with full
-   type information, then flips watchsort on the matching entry so the logger
-   picks it up. Returns 0 on success, non-zero on failure. */
+/* CLI helpers for building watch-list entries by descriptor path.
+   Supports dotted struct-member paths like "gSim.Time.Time" by walking each
+   level with PviReadStructElements. The leaf must be a scalar (not struct,
+   not array) to match the GUI's watchlist rules. */
+
+/* Lists all PVAR descriptors matching a parent (cpu for globals, task for
+   locals, or any PVAR whose own descriptor is `parent_desc` for struct
+   children). Writes up to buflen bytes to buf as comma-separated. Returns
+   the number of matches found (not the number printed). */
+static int ListPvarSiblings( PVIOBJECT *cpu, PVIOBJECT *task_or_null,
+                              const char *parent_desc, char *buf, int buflen ) {
+	PVIOBJECT *o;
+	int n = 0, used = 0;
+	size_t parent_len = parent_desc ? strlen(parent_desc) : 0;
+	if( buflen > 0 ) buf[0] = 0;
+	o = GetNextPviObject(TRUE);
+	while( (o = GetNextPviObject(FALSE)) != NULL ) {
+		if( o->type != POBJ_PVAR ) continue;
+		if( o->ex.pv.cpu != cpu ) continue;
+		if( task_or_null && o->ex.pv.task != task_or_null ) continue;
+		if( !task_or_null && o->ex.pv.task != cpu ) continue;
+		if( parent_desc && parent_len > 0 ) {
+			/* struct child: descriptor starts with parent_desc + "." and has no further dots */
+			if( strncmp(o->descriptor, parent_desc, parent_len) != 0 ) continue;
+			if( o->descriptor[parent_len] != '.' ) continue;
+			if( strchr(o->descriptor + parent_len + 1, '.' ) != NULL ) continue;
+		} else {
+			/* top-level: descriptor must have no dots */
+			if( strchr(o->descriptor, '.') != NULL ) continue;
+		}
+		++n;
+		if( used + (int)strlen(o->descriptor) + 2 < buflen ) {
+			if( used > 0 ) { buf[used++] = ','; buf[used++] = ' '; }
+			strcpy( buf + used, o->descriptor );
+			used += (int)strlen(o->descriptor);
+		}
+	}
+	return n;
+}
+
+/* Walks a dotted suffix starting from `first`, calling PviReadStructElements
+   at each level and matching children by full descriptor. On error, reports
+   with ReportError and returns NULL. */
+static PVIOBJECT *TraverseStructMembers( PVIOBJECT *cpu, PVIOBJECT *first,
+                                          const char *suffix ) {
+	PVIOBJECT *current = first;
+	char path[512];
+	const char *p = suffix;
+
+	strncpy( path, first->descriptor, sizeof(path)-1 );
+	path[sizeof(path)-1] = 0;
+
+	while( p && *p ) {
+		const char *dot;
+		size_t seglen, cur_len;
+		PVIOBJECT *child = NULL, *o;
+
+		if( current->ex.pv.type != BR_STRUCT ) {
+			ReportError( REPORT_ERROR, "AddPvar",
+				"'%s' is not a struct (type %d); cannot access member '.%s'",
+				path, (int)current->ex.pv.type, p );
+			return NULL;
+		}
+
+		PviReadStructElements( current );
+
+		dot = strchr( p, '.' );
+		seglen = dot ? (size_t)(dot - p) : strlen(p);
+		cur_len = strlen(path);
+		if( cur_len + 1 + seglen >= sizeof(path) ) {
+			ReportError( REPORT_ERROR, "AddPvar", "descriptor path too long" );
+			return NULL;
+		}
+		path[cur_len] = '.';
+		memcpy( path + cur_len + 1, p, seglen );
+		path[cur_len + 1 + seglen] = 0;
+
+		o = GetNextPviObject(TRUE);
+		while( (o = GetNextPviObject(FALSE)) != NULL ) {
+			if( o->type == POBJ_PVAR
+			    && o->ex.pv.cpu == cpu
+			    && strcmp(o->descriptor, path) == 0 )
+			{
+				child = o;
+				break;
+			}
+		}
+		if( !child ) {
+			char siblings[512];
+			ListPvarSiblings( cpu, NULL, current->descriptor, siblings, sizeof(siblings) );
+			ReportError( REPORT_ERROR, "AddPvar",
+				"Struct member '%s' not found. Siblings under '%s': %s",
+				path, current->descriptor,
+				siblings[0] ? siblings : "(none - struct empty or not browseable)" );
+			return NULL;
+		}
+		current = child;
+		p = dot ? dot + 1 : NULL;
+	}
+	return current;
+}
+
+/* Validate the final leaf — must be a scalar, not a struct, not an array. */
+static int ValidatePvarLeaf( PVIOBJECT *leaf, const char *user_input ) {
+	if( leaf->ex.pv.type == BR_STRUCT ) {
+		ReportError( REPORT_ERROR, "AddPvar",
+			"'%s' is a struct; specify a leaf member like '%s.someField'",
+			user_input, user_input );
+		return -1;
+	}
+	if( leaf->ex.pv.dimension > 1 ) {
+		ReportError( REPORT_ERROR, "AddPvar",
+			"'%s' is an array (%d elements); watching arrays is not supported",
+			user_input, leaf->ex.pv.dimension );
+		return -1;
+	}
+	return 0;
+}
+
+
 int AddGlobalPvarByCpuDescriptor( const char *cpu_descriptor, const char *var_name ) {
 	PVIOBJECT *obj;
 	PVIOBJECT *cpu = NULL;
+	PVIOBJECT *leaf = NULL;
+	char first_seg[256];
+	const char *rest = NULL;
+	const char *dot;
+	size_t seglen;
 
 	if( !cpu_descriptor || !var_name || !*cpu_descriptor || !*var_name ) return -1;
 
@@ -2038,30 +2159,61 @@ int AddGlobalPvarByCpuDescriptor( const char *cpu_descriptor, const char *var_na
 		}
 	}
 	if( cpu == NULL ) {
-		ReportError( REPORT_ERROR, "AddPvar", "CPU with descriptor '%s' not found. Check brwatch.ini [CPUn] descriptor matches.", cpu_descriptor );
+		ReportError( REPORT_ERROR, "AddPvar",
+			"CPU with descriptor '%s' not found. Check brwatch.ini [CPUn] descriptor matches.",
+			cpu_descriptor );
 		return -1;
 	}
 
-	/* Make PVI enumerate the global PVARs under this CPU (synchronous). */
+	/* split var_name on first '.' into first_seg (top-level global name) + rest */
+	dot = strchr( var_name, '.' );
+	seglen = dot ? (size_t)(dot - var_name) : strlen(var_name);
+	if( seglen == 0 || seglen >= sizeof(first_seg) ) {
+		ReportError( REPORT_ERROR, "AddPvar", "invalid var name '%s'", var_name );
+		return -1;
+	}
+	memcpy( first_seg, var_name, seglen );
+	first_seg[seglen] = 0;
+	rest = dot ? dot + 1 : NULL;
+
+	/* enumerate the CPU's top-level globals (synchronous via PviRead) */
 	PviReadPvarList( cpu );
 
-	/* find the PVAR by its descriptor, scope must be global */
+	/* find the top-level global matching first_seg. PviReadPvarList sets
+	   ex.pv.task = cpu for globals (see line ~1451), so match on that. */
 	obj = GetNextPviObject(TRUE);
 	while( (obj = GetNextPviObject(FALSE)) != NULL ) {
 		if( obj->type == POBJ_PVAR
 		    && obj->ex.pv.cpu == cpu
-		    && obj->ex.pv.task == NULL
-		    && strcmp(obj->descriptor, var_name) == 0
+		    && (obj->ex.pv.task == cpu || obj->ex.pv.task == NULL)
+		    && strcmp(obj->descriptor, first_seg) == 0
 		    && (obj->ex.pv.scope[0] == 'g' || obj->ex.pv.scope[0] == 0) )
 		{
-			obj->watchsort = 0;
-			WatchPviObject( obj, TRUE );  /* allocates pvalue buffer and subscribes */
-			return 0;
+			leaf = obj;
+			break;
 		}
 	}
+	if( leaf == NULL ) {
+		char siblings[512];
+		ListPvarSiblings( cpu, NULL, NULL, siblings, sizeof(siblings) );
+		ReportError( REPORT_ERROR, "AddPvar",
+			"Global PVAR '%s' not found under CPU '%s'. Available globals: %s",
+			first_seg, cpu_descriptor,
+			siblings[0] ? siblings : "(none - PLC refused browse, check ANSL user rights)" );
+		return -1;
+	}
 
-	ReportError( REPORT_ERROR, "AddPvar", "Global PVAR '%s' not found under CPU '%s'", var_name, cpu_descriptor );
-	return -1;
+	/* if the user supplied a dotted path, walk struct members */
+	if( rest ) {
+		leaf = TraverseStructMembers( cpu, leaf, rest );
+		if( leaf == NULL ) return -1;
+	}
+
+	if( ValidatePvarLeaf( leaf, var_name ) != 0 ) return -1;
+
+	leaf->watchsort = 0;
+	WatchPviObject( leaf, TRUE );
+	return 0;
 }
 
 
@@ -2069,6 +2221,11 @@ int AddLocalPvarByCpuTaskDescriptor( const char *cpu_descriptor, const char *tas
 	PVIOBJECT *obj;
 	PVIOBJECT *cpu = NULL;
 	PVIOBJECT *task = NULL;
+	PVIOBJECT *leaf = NULL;
+	char first_seg[256];
+	const char *rest = NULL;
+	const char *dot;
+	size_t seglen;
 
 	if( !cpu_descriptor || !task_descriptor || !var_name ) return -1;
 
@@ -2102,24 +2259,51 @@ int AddLocalPvarByCpuTaskDescriptor( const char *cpu_descriptor, const char *tas
 		return -1;
 	}
 
+	/* split var_name on first '.' */
+	dot = strchr( var_name, '.' );
+	seglen = dot ? (size_t)(dot - var_name) : strlen(var_name);
+	if( seglen == 0 || seglen >= sizeof(first_seg) ) {
+		ReportError( REPORT_ERROR, "AddPvar", "invalid var name '%s'", var_name );
+		return -1;
+	}
+	memcpy( first_seg, var_name, seglen );
+	first_seg[seglen] = 0;
+	rest = dot ? dot + 1 : NULL;
+
 	/* enumerate PVARs under this task */
 	PviReadPvarList( task );
 
-	/* find the PVAR by descriptor, scope must be local or dynamic */
+	/* find the top-level task-local PVAR matching first_seg */
 	obj = GetNextPviObject(TRUE);
 	while( (obj = GetNextPviObject(FALSE)) != NULL ) {
 		if( obj->type == POBJ_PVAR
 		    && obj->ex.pv.task == task
-		    && strcmp(obj->descriptor, var_name) == 0 )
+		    && strcmp(obj->descriptor, first_seg) == 0 )
 		{
-			obj->watchsort = 0;
-			WatchPviObject( obj, TRUE );  /* allocates pvalue buffer and subscribes */
-			return 0;
+			leaf = obj;
+			break;
 		}
 	}
+	if( leaf == NULL ) {
+		char siblings[512];
+		ListPvarSiblings( cpu, task, NULL, siblings, sizeof(siblings) );
+		ReportError( REPORT_ERROR, "AddPvar",
+			"Local PVAR '%s' not found under %s:%s. Available locals: %s",
+			first_seg, cpu_descriptor, task_descriptor,
+			siblings[0] ? siblings : "(none - task refused browse or no PVARs)" );
+		return -1;
+	}
 
-	ReportError( REPORT_ERROR, "AddPvar", "Local PVAR '%s' not found under %s:%s", var_name, cpu_descriptor, task_descriptor );
-	return -1;
+	if( rest ) {
+		leaf = TraverseStructMembers( cpu, leaf, rest );
+		if( leaf == NULL ) return -1;
+	}
+
+	if( ValidatePvarLeaf( leaf, var_name ) != 0 ) return -1;
+
+	leaf->watchsort = 0;
+	WatchPviObject( leaf, TRUE );
+	return 0;
 }
 
 
