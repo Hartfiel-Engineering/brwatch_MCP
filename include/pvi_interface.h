@@ -138,5 +138,17 @@ int GetNumberOfPviObjects( void );
 int AddToPviWatchFile( PVIOBJECT *object, char *filename );
 int LoadPviObjectsFromWatchFile(T_POBJ_TYPE typefilter, char *filename);
 
+/* CLI helper: add a global PVAR to the watch list by CPU descriptor + var name.
+   Looks up the CPU object by matching its 'descriptor' field, then creates a
+   child PVAR with CD=<var_name>. Returns 0 on success, non-zero on failure.
+   Used by brwatch.exe start-logging --pv "cpu->var" */
+int AddGlobalPvarByCpuDescriptor( const char *cpu_descriptor, const char *var_name );
+
+/* CLI helper: add a local (task-scoped) PVAR to the watch list. Looks up the
+   CPU, triggers task-list enumeration, finds the matching task, triggers that
+   task's PVAR enumeration, flips watchsort on the match.
+   Used by brwatch.exe start-logging --pv "cpu->task:var" */
+int AddLocalPvarByCpuTaskDescriptor( const char *cpu_descriptor, const char *task_descriptor, const char *var_name );
+
 
 #endif

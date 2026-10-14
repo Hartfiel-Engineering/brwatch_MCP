@@ -2019,6 +2019,110 @@ int LoadPviObjectsFromWatchFile(T_POBJ_TYPE typefilter, char *filename) {
 }
 
 
+/* CLI helper: add a global PVAR to the watch list by CPU descriptor + var name.
+   Triggers PviReadPvarList on the CPU to populate all global PVARs with full
+   type information, then flips watchsort on the matching entry so the logger
+   picks it up. Returns 0 on success, non-zero on failure. */
+int AddGlobalPvarByCpuDescriptor( const char *cpu_descriptor, const char *var_name ) {
+	PVIOBJECT *obj;
+	PVIOBJECT *cpu = NULL;
+
+	if( !cpu_descriptor || !var_name || !*cpu_descriptor || !*var_name ) return -1;
+
+	/* find the CPU object by its descriptor (set from the [CPUn] INI section) */
+	obj = GetNextPviObject(TRUE);
+	while( (obj = GetNextPviObject(FALSE)) != NULL ) {
+		if( obj->type == POBJ_CPU && strcmp(obj->descriptor, cpu_descriptor) == 0 ) {
+			cpu = obj;
+			break;
+		}
+	}
+	if( cpu == NULL ) {
+		ReportError( REPORT_ERROR, "AddPvar", "CPU with descriptor '%s' not found. Check brwatch.ini [CPUn] descriptor matches.", cpu_descriptor );
+		return -1;
+	}
+
+	/* Make PVI enumerate the global PVARs under this CPU (synchronous). */
+	PviReadPvarList( cpu );
+
+	/* find the PVAR by its descriptor, scope must be global */
+	obj = GetNextPviObject(TRUE);
+	while( (obj = GetNextPviObject(FALSE)) != NULL ) {
+		if( obj->type == POBJ_PVAR
+		    && obj->ex.pv.cpu == cpu
+		    && obj->ex.pv.task == NULL
+		    && strcmp(obj->descriptor, var_name) == 0
+		    && (obj->ex.pv.scope[0] == 'g' || obj->ex.pv.scope[0] == 0) )
+		{
+			obj->watchsort = 0;
+			WatchPviObject( obj, TRUE );  /* allocates pvalue buffer and subscribes */
+			return 0;
+		}
+	}
+
+	ReportError( REPORT_ERROR, "AddPvar", "Global PVAR '%s' not found under CPU '%s'", var_name, cpu_descriptor );
+	return -1;
+}
+
+
+int AddLocalPvarByCpuTaskDescriptor( const char *cpu_descriptor, const char *task_descriptor, const char *var_name ) {
+	PVIOBJECT *obj;
+	PVIOBJECT *cpu = NULL;
+	PVIOBJECT *task = NULL;
+
+	if( !cpu_descriptor || !task_descriptor || !var_name ) return -1;
+
+	/* find the CPU object by descriptor */
+	obj = GetNextPviObject(TRUE);
+	while( (obj = GetNextPviObject(FALSE)) != NULL ) {
+		if( obj->type == POBJ_CPU && strcmp(obj->descriptor, cpu_descriptor) == 0 ) {
+			cpu = obj;
+			break;
+		}
+	}
+	if( cpu == NULL ) {
+		ReportError( REPORT_ERROR, "AddPvar", "CPU with descriptor '%s' not found", cpu_descriptor );
+		return -1;
+	}
+
+	/* enumerate tasks under this CPU */
+	PviReadTaskList( cpu );
+
+	/* find the task by descriptor */
+	obj = GetNextPviObject(TRUE);
+	while( (obj = GetNextPviObject(FALSE)) != NULL ) {
+		if( obj->type == POBJ_TASK && obj->ex.task.cpu == cpu
+		    && strcmp(obj->descriptor, task_descriptor) == 0 ) {
+			task = obj;
+			break;
+		}
+	}
+	if( task == NULL ) {
+		ReportError( REPORT_ERROR, "AddPvar", "Task '%s' not found under CPU '%s'", task_descriptor, cpu_descriptor );
+		return -1;
+	}
+
+	/* enumerate PVARs under this task */
+	PviReadPvarList( task );
+
+	/* find the PVAR by descriptor, scope must be local or dynamic */
+	obj = GetNextPviObject(TRUE);
+	while( (obj = GetNextPviObject(FALSE)) != NULL ) {
+		if( obj->type == POBJ_PVAR
+		    && obj->ex.pv.task == task
+		    && strcmp(obj->descriptor, var_name) == 0 )
+		{
+			obj->watchsort = 0;
+			WatchPviObject( obj, TRUE );  /* allocates pvalue buffer and subscribes */
+			return 0;
+		}
+	}
+
+	ReportError( REPORT_ERROR, "AddPvar", "Local PVAR '%s' not found under %s:%s", var_name, cpu_descriptor, task_descriptor );
+	return -1;
+}
+
+
 
 
 
