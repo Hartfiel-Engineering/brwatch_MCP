@@ -279,6 +279,25 @@ static void CliObjectsValid( void ) {
 	s_pvi_objects_valid = TRUE;
 }
 
+/* Pump messages until PVI reports objects valid (POBJ_EVENT_PVI_ARRANGE,
+   where the line/device/CPU objects are created). A cold start that has to
+   launch PVI Manager can take several seconds; without this event nothing
+   exists to attach PVs to, so later steps would fail with a misleading
+   "CPU not found". Returns FALSE (error printed) on timeout or abort. */
+#define PVI_READY_TIMEOUT_MS 15000
+static BOOL WaitForPviObjects( const char *cmd ) {
+	DWORD start = GetTickCount();
+	while( !s_pvi_objects_valid && !s_abort && (GetTickCount() - start) < PVI_READY_TIMEOUT_MS ) {
+		PumpMessages( 100 );
+	}
+	if( s_pvi_objects_valid ) return TRUE;
+	if( !s_abort ) {
+		fprintf( stderr, "[ERROR] %s: PVI did not become ready within %d s "
+		                 "(is PVI Manager running / installed?)\n", cmd, PVI_READY_TIMEOUT_MS / 1000 );
+	}
+	return FALSE;
+}
+
 /* ---- subcommand handlers ---- */
 
 static int CmdHelp( int argc, char **argv ) {
@@ -379,13 +398,9 @@ static int CmdListPvs( int argc, char **argv ) {
 		return 2;
 	}
 
-	/* Pump up to 3 s waiting for cbobjects_valid; PviCyclicRequests fires
-	   every 500ms and processes the response queue. */
-	{
-		DWORD start = GetTickCount();
-		while( !s_pvi_objects_valid && !s_abort && (GetTickCount() - start) < 3000 ) {
-			PumpMessages( 100 );
-		}
+	if( !WaitForPviObjects( "list-pvs" ) ) {
+		StopPvi();
+		return 2;
 	}
 
 	LoadPviObjectsFromWatchFile( POBJ_CPU,  (char*)watch_file );
@@ -593,12 +608,9 @@ static int CmdStartLogging( int argc, char **argv ) {
 		return 2;
 	}
 
-	/* Wait for cbobjects_valid, up to 3 s. */
-	{
-		DWORD start = GetTickCount();
-		while( !s_pvi_objects_valid && !s_abort && (GetTickCount() - start) < 3000 ) {
-			PumpMessages( 100 );
-		}
+	if( !WaitForPviObjects( "start-logging" ) ) {
+		StopPvi();
+		return 2;
 	}
 
 	/* Load the watch file if requested OR fall back to default. If --pv or
