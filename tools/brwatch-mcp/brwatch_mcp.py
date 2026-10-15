@@ -38,6 +38,7 @@ PVS_FILE = "pvs.json"
 DB_FILE = "brwatch.db"
 NOTES_FILE = "notes.md"
 PID_FILE = ".pid"
+PV_SPEC_FILE = ".pvs.txt"  # pvs.json flattened for `start-logging --pv-file`
 
 CREATE_NO_WINDOW = 0x08000000  # Windows CreateProcess flag
 
@@ -231,8 +232,8 @@ def scan_network() -> list[dict]:
 def start_logging(cycle_ms: int = 500, notes: Optional[str] = None) -> dict:
     """
     Start a logging run. Reads the watched PVs from .brwatch/pvs.json (populated
-    by prior add_watch calls) and spawns brwatch.exe start-logging in the
-    background with those --pv args.
+    by prior add_watch calls), writes them to .brwatch/.pvs.txt, and spawns
+    brwatch.exe start-logging --pv-file in the background. No PV count limit.
 
     Returns immediately. Use stop_logging() to end the run cleanly. query_samples
     and list_runs will see live data while the logger is running (WAL mode).
@@ -256,15 +257,19 @@ def start_logging(cycle_ms: int = 500, notes: Optional[str] = None) -> dict:
         except ValueError:
             pid_path.unlink(missing_ok=True)
 
+    # Pass PVs via a spec file rather than one --pv per PV: the command line
+    # has a bounded argv/length, the file doesn't.
+    spec_path = pdir / PV_SPEC_FILE
+    spec_path.write_text("".join(f"{pv}\n" for pv in pvs), encoding="utf-8")
+
     args: list[str] = [
         brwatch_exe(), "start-logging",
         "--cycle", str(cycle_ms),
         "--db", str(pdir / DB_FILE),
+        "--pv-file", str(spec_path),
     ]
     if notes:
         args.extend(["--notes", notes])
-    for pv in pvs:
-        args.extend(["--pv", pv])
 
     cwd = pdir.parent
     proc = subprocess.Popen(

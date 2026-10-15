@@ -16,7 +16,8 @@
 #include "sqlite/sqlite3.h"
 #include "pvicom.h"
 
-#define MAX_ARGV 32
+#define MAX_ARGV     256
+#define ARGV_BUFSIZE 16384
 
 typedef struct {
 	const char *name;
@@ -40,7 +41,7 @@ static int CmdDbInfo( int argc, char **argv );
 static Subcommand subcommands[] = {
 	{ "scan",          CmdScan,         "Discover B&R CPUs on the network" },
 	{ "list-pvs",      CmdListPvs,      "List PVs loaded from a watch file (--watch FILE)" },
-	{ "start-logging", CmdStartLogging, "Blocking logger - samples PVs to SQLite (--watch FILE and/or --pv cpu->var)" },
+	{ "start-logging", CmdStartLogging, "Blocking logger - samples PVs to SQLite (--watch FILE, --pv cpu->var, --pv-file FILE)" },
 	{ "stop-logging",  CmdStopLogging,  "Signal a running start-logging to exit cleanly" },
 	{ "query",         CmdQuery,        "Query samples for a PV from the DB (--since/--until)" },
 	{ "db-info",       CmdDbInfo,       "Show runs and PV counts in the DB" },
@@ -162,16 +163,20 @@ static long long NowUtcMs( void ) {
 /* ---- argv parsing ----
    Splits lpCmdLine into argv. Honors double-quoted substrings so paths with
    spaces survive. argv[0] is the first real token (NOT the exe name, since
-   WinMain's lpCmdLine already excludes it). */
-static int ParseArgv( LPSTR cmdline, char *argv[MAX_ARGV], char *buf, int buflen ) {
+   WinMain's lpCmdLine already excludes it).
+   *truncated is set if tokens were dropped (MAX_ARGV or buflen exceeded) so
+   the caller can fail loudly instead of running with a partial argv. */
+static int ParseArgv( LPSTR cmdline, char *argv[MAX_ARGV], char *buf, int buflen, BOOL *truncated ) {
 	int argc = 0;
 	char *src = cmdline;
 	char *dst = buf;
 	char *end = buf + buflen - 1;
 
-	while( *src && argc < MAX_ARGV - 1 ) {
+	*truncated = FALSE;
+	for( ;; ) {
 		while( *src == ' ' || *src == '\t' ) ++src;
 		if( !*src ) break;
+		if( argc >= MAX_ARGV - 1 ) { *truncated = TRUE; break; }
 
 		argv[argc++] = dst;
 
@@ -182,7 +187,7 @@ static int ParseArgv( LPSTR cmdline, char *argv[MAX_ARGV], char *buf, int buflen
 			*dst++ = *src++;
 		}
 		if( dst < end ) *dst++ = 0;
-		else break;
+		else { *dst = 0; *truncated = TRUE; break; }
 	}
 	argv[argc] = NULL;
 	return argc;
@@ -464,14 +469,92 @@ static void WriteSampleTick( long long ts_ms ) {
 	LoggerDbCommitBatch();
 }
 
+/* Add one PV spec to the watch list. Format:
+   - "cpu_desc->var_name"           -> global PVAR
+   - "cpu_desc->task_desc:var_name" -> local PVAR
+   Returns 0 on success, 1 on a malformed spec, 2 if PVI rejected it. */
+static int AddPvSpec( const char *spec ) {
+	const char *arrow = strstr( spec, "->" );
+	char cpu_desc[128];
+	size_t cpu_len;
+	const char *after_arrow;
+	const char *colon;
+
+	if( !arrow ) {
+		fprintf( stderr, "[ERROR] start-logging: PV spec '%s' missing '->' (expected cpu_desc->[task:]var_name)\n", spec );
+		return 1;
+	}
+	cpu_len = (size_t)(arrow - spec);
+	if( cpu_len >= sizeof(cpu_desc) ) cpu_len = sizeof(cpu_desc) - 1;
+	memcpy( cpu_desc, spec, cpu_len );
+	cpu_desc[cpu_len] = 0;
+
+	after_arrow = arrow + 2;
+	colon = strchr( after_arrow, ':' );
+	if( colon ) {
+		/* local: cpu_desc->task_desc:var_name */
+		char task_desc[128], var_name[256];
+		size_t task_len = (size_t)(colon - after_arrow);
+		if( task_len >= sizeof(task_desc) ) task_len = sizeof(task_desc) - 1;
+		memcpy( task_desc, after_arrow, task_len );
+		task_desc[task_len] = 0;
+		strncpy( var_name, colon + 1, sizeof(var_name) - 1 );
+		var_name[sizeof(var_name) - 1] = 0;
+		return AddLocalPvarByCpuTaskDescriptor( cpu_desc, task_desc, var_name ) ? 2 : 0;
+	}
+	/* global: cpu_desc->var_name */
+	return AddGlobalPvarByCpuDescriptor( cpu_desc, after_arrow ) ? 2 : 0;
+}
+
+/* Add every PV spec in a --pv-file: one spec per line, blank lines and
+   lines starting with '#' ignored. Returns 0 on success or AddPvSpec's
+   error code; *added receives the number of specs added. */
+static int AddPvSpecsFromFile( const char *path, int *added ) {
+	char line[1024];
+	FILE *f = fopen( path, "r" );
+	int first = 1;
+
+	*added = 0;
+	if( !f ) {
+		fprintf( stderr, "[ERROR] start-logging: cannot open --pv-file %s\n", path );
+		return 2;
+	}
+	while( fgets( line, sizeof(line), f ) ) {
+		char *s = line;
+		char *e;
+		int rc;
+
+		/* Skip a UTF-8 BOM on the first line. */
+		if( first && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF ) s += 3;
+		first = 0;
+
+		while( *s == ' ' || *s == '\t' ) ++s;
+		e = s + strlen( s );
+		while( e > s && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ' || e[-1] == '\t') ) --e;
+		*e = 0;
+		if( !*s || *s == '#' ) continue;
+
+		rc = AddPvSpec( s );
+		if( rc ) { fclose( f ); return rc; }
+		++*added;
+	}
+	fclose( f );
+	return 0;
+}
+
 static int CmdStartLogging( int argc, char **argv ) {
 	int cycle_ms = 500;
 	const char *db_path = NULL;
 	const char *watch_file = NULL;
 	const char *notes = NULL;
-	/* --pv entries: up to 32 inline global PV specs of the form "cpu_desc->var_name" */
-	const char *inline_pvs[32];
+	/* --pv entries: inline PV specs of the form "cpu_desc->[task:]var_name".
+	   argc < MAX_ARGV, so the arrays can't overflow. */
+	const char *inline_pvs[MAX_ARGV];
 	int inline_pv_count = 0;
+	/* --pv-file entries: files of PV specs, one per line */
+	const char *pv_files[MAX_ARGV];
+	int pv_file_count = 0;
+	int file_pv_count = 0;
 	char db_default[MAX_PATH];
 	char watch_default[MAX_PATH];
 	char sentinel_path[MAX_PATH];
@@ -483,10 +566,8 @@ static int CmdStartLogging( int argc, char **argv ) {
 		else if( strcmp(argv[a], "--db") == 0 && a+1 < argc )     db_path    = argv[++a];
 		else if( strcmp(argv[a], "--watch") == 0 && a+1 < argc )  watch_file = argv[++a];
 		else if( strcmp(argv[a], "--notes") == 0 && a+1 < argc )  notes      = argv[++a];
-		else if( strcmp(argv[a], "--pv") == 0 && a+1 < argc ) {
-			if( inline_pv_count < 32 ) inline_pvs[inline_pv_count++] = argv[++a];
-			else { fprintf(stderr, "[ERROR] start-logging: too many --pv (max 32)\n"); return 1; }
-		}
+		else if( strcmp(argv[a], "--pv") == 0 && a+1 < argc )      inline_pvs[inline_pv_count++] = argv[++a];
+		else if( strcmp(argv[a], "--pv-file") == 0 && a+1 < argc ) pv_files[pv_file_count++]     = argv[++a];
 	}
 
 	if( cycle_ms < 50 ) {
@@ -520,9 +601,9 @@ static int CmdStartLogging( int argc, char **argv ) {
 		}
 	}
 
-	/* Load the watch file if requested OR fall back to default. If --pv args
-	   are present and no explicit --watch, skip the default-file load. */
-	if( watch_file || inline_pv_count == 0 ) {
+	/* Load the watch file if requested OR fall back to default. If --pv or
+	   --pv-file args are present and no explicit --watch, skip the default-file load. */
+	if( watch_file || (inline_pv_count == 0 && pv_file_count == 0) ) {
 		if( !watch_file ) {
 			BuildPathUnder( DEFAULT_BRWATCH_DIR, DEFAULT_WATCH_NAME, watch_default, sizeof(watch_default) );
 			watch_file = watch_default;
@@ -535,54 +616,23 @@ static int CmdStartLogging( int argc, char **argv ) {
 				StopPvi();
 				return 2;
 			}
-		} else if( inline_pv_count == 0 ) {
-			fprintf( stderr, "[ERROR] start-logging: no watch file at %s and no --pv args\n", watch_file );
+		} else if( inline_pv_count == 0 && pv_file_count == 0 ) {
+			fprintf( stderr, "[ERROR] start-logging: no watch file at %s and no --pv/--pv-file args\n", watch_file );
 			StopPvi();
 			return 2;
 		}
 	}
 
-	/* Add any --pv inline specs. Format:
-	   - "cpu_desc->var_name"           -> global PVAR
-	   - "cpu_desc->task_desc:var_name" -> local PVAR */
+	/* Add any --pv inline specs, then any --pv-file specs. */
 	for( int i = 0; i < inline_pv_count; ++i ) {
-		const char *spec = inline_pvs[i];
-		const char *arrow = strstr( spec, "->" );
-		if( !arrow ) {
-			fprintf( stderr, "[ERROR] start-logging: --pv spec '%s' missing '->' (expected cpu_desc->[task:]var_name)\n", spec );
-			StopPvi();
-			return 1;
-		}
-		{
-			char cpu_desc[128];
-			size_t cpu_len = (size_t)(arrow - spec);
-			if( cpu_len >= sizeof(cpu_desc) ) cpu_len = sizeof(cpu_desc) - 1;
-			memcpy( cpu_desc, spec, cpu_len );
-			cpu_desc[cpu_len] = 0;
-
-			const char *after_arrow = arrow + 2;
-			const char *colon = strchr( after_arrow, ':' );
-			int rc;
-			if( colon ) {
-				/* local: cpu_desc->task_desc:var_name */
-				char task_desc[128], var_name[256];
-				size_t task_len = (size_t)(colon - after_arrow);
-				if( task_len >= sizeof(task_desc) ) task_len = sizeof(task_desc) - 1;
-				memcpy( task_desc, after_arrow, task_len );
-				task_desc[task_len] = 0;
-				strncpy( var_name, colon + 1, sizeof(var_name) - 1 );
-				var_name[sizeof(var_name) - 1] = 0;
-				rc = AddLocalPvarByCpuTaskDescriptor( cpu_desc, task_desc, var_name );
-			} else {
-				/* global: cpu_desc->var_name */
-				rc = AddGlobalPvarByCpuDescriptor( cpu_desc, after_arrow );
-			}
-			if( rc != 0 ) {
-				/* ReportError already printed */
-				StopPvi();
-				return 2;
-			}
-		}
+		int rc = AddPvSpec( inline_pvs[i] );
+		if( rc ) { StopPvi(); return rc; }  /* error already printed */
+	}
+	for( int i = 0; i < pv_file_count; ++i ) {
+		int added;
+		int rc = AddPvSpecsFromFile( pv_files[i], &added );
+		if( rc ) { StopPvi(); return rc; }
+		file_pv_count += added;
 	}
 
 	/* Let PVI resolve link IDs for the loaded objects. */
@@ -590,8 +640,8 @@ static int CmdStartLogging( int argc, char **argv ) {
 
 	watchlist_size = CountWatchlistPvs();
 	if( watchlist_size == 0 ) {
-		fprintf( stderr, "[ERROR] start-logging: no PVARs in watch list (watch_file=%s, --pv count=%d)\n",
-		         watch_file ? watch_file : "(none)", inline_pv_count );
+		fprintf( stderr, "[ERROR] start-logging: no PVARs in watch list (watch_file=%s, --pv count=%d, --pv-file count=%d)\n",
+		         watch_file ? watch_file : "(none)", inline_pv_count, file_pv_count );
 		StopPvi();
 		return 2;
 	}
@@ -886,14 +936,15 @@ static Subcommand *FindSubcommand( const char *name ) {
 }
 
 BOOL CliTryDispatch( LPSTR lpCmdLine, HINSTANCE hInstance, int *out_exit_code ) {
-	char buf[2048];
+	static char buf[ARGV_BUFSIZE];
 	char *argv[MAX_ARGV];
 	int argc;
+	BOOL truncated;
 	Subcommand *sub;
 
 	if( !lpCmdLine || !*lpCmdLine ) return FALSE;
 
-	argc = ParseArgv( lpCmdLine, argv, buf, sizeof(buf) );
+	argc = ParseArgv( lpCmdLine, argv, buf, sizeof(buf), &truncated );
 	if( argc == 0 ) return FALSE;
 
 	sub = FindSubcommand( argv[0] );
@@ -909,6 +960,14 @@ BOOL CliTryDispatch( LPSTR lpCmdLine, HINSTANCE hInstance, int *out_exit_code ) 
 	SetupConsole();
 	SetupMessageWindow( hInstance );
 	SetConsoleCtrlHandler( CtrlHandler, TRUE );
+
+	if( truncated ) {
+		fprintf( stderr, "[ERROR] %s: command line too long (max %d args / %d bytes); "
+		                 "use --pv-file for large PV lists\n", argv[0], MAX_ARGV - 1, ARGV_BUFSIZE );
+		fflush( stderr );
+		*out_exit_code = 1;
+		return TRUE;
+	}
 
 	SettingsInitialize();
 

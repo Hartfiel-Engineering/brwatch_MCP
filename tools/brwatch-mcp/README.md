@@ -50,12 +50,14 @@ your-machine-folder/
     brwatch.db          # SQLite - runs/pvs/samples tables
     notes.md            # free-form notes about the machine
     .pid                # PID of running start-logging (if any)
+    .pvs.txt            # pvs.json flattened to one spec per line (written by start_logging)
     .stop               # stop sentinel (transient)
 ```
 
 `pvs.json` is written by `add_watch` and `remove_watch`. The brwatch.exe CLI
-isn't aware of this file - the MCP server passes PVs as `--pv` args when it
-spawns `start-logging`.
+isn't aware of this file - when `start_logging` runs, the MCP server writes the
+PVs to `.pvs.txt` and passes it as `--pv-file`, so there's no limit on how many
+PVs a run can log.
 
 ## Tools
 
