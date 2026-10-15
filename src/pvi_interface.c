@@ -39,6 +39,7 @@ static PVIOBJECT *PviReadPvarList( PVIOBJECT * object );
 static PVIOBJECT *PviReadCPUList(PVIOBJECT *object );
 static PVIOBJECT *PviReadTaskList(PVIOBJECT *object);
 static PVIOBJECT *PviReadStructElements( PVIOBJECT *pvar );
+static int PviReadAll( DWORD linkid, int access, char **out );
 static PVIOBJECT *FindPviObjectByLinkId( DWORD );
 static void PviReadDataType( PVIOBJECT *object );
 
@@ -1274,7 +1275,8 @@ static PVIOBJECT * PviReadTaskList(PVIOBJECT *object) {
 	if( object->error != 0 )
 		return NULL;
 
-	result = PviRead(object->linkid, POBJ_ACC_LIST_TASK, NULL, 0, pbuffer, 65535);
+	free(pbuffer);
+	result = PviReadAll(object->linkid, POBJ_ACC_LIST_TASK, &pbuffer);  // list can exceed a fixed buffer
 	if (result == 0) {
 		s = pbuffer;
 		while(*s) {
@@ -1283,7 +1285,7 @@ static PVIOBJECT * PviReadTaskList(PVIOBJECT *object) {
 			do {
 				*d++ = *s++;
 			} while ((*s != 0) && (*s != '\t'));
-			++s;					// ignore tabs
+			if (*s) ++s;			// ignore tabs (but don't step past the end)
 			*d = 0;					// terminate with zero
 			strcpy( tempobject->name, object->name );
 			strcat( tempobject->name, "/" );
@@ -1319,22 +1321,23 @@ static PVIOBJECT *PviReadPvarList(PVIOBJECT * object) {
 		return NULL;
 
 
-	pbuffer = (char *)malloc(65535);
-
-	if (pbuffer == NULL) {
-		AddRowToLog("PviReadPvarList:malloc(65535)", -1);
-		return NULL;			// error
-	}
-
-	memset(pbuffer, 0, 65535 );
-
 	/* link object */
 	AddPviObject( object, 1 );
-	/* read list of variables */
-	result = PviRead(object->linkid, POBJ_ACC_LIST_PVAR, NULL, 0, pbuffer, 65530);
+	/* read list of variables - can exceed a fixed buffer on large projects */
+	result = PviReadAll(object->linkid, POBJ_ACC_LIST_PVAR, &pbuffer);
 	if (result == 0) {
+		/* append a tab so the last entry is terminated like the others */
+		size_t len = strlen(pbuffer);
+		char *nbuf = (char *)realloc(pbuffer, len + 2);
+		if (nbuf == NULL) {
+			free(pbuffer);
+			AddRowToLog("PviReadPvarList:realloc", -1);
+			return NULL;
+		}
+		pbuffer = nbuf;
+		pbuffer[len] = '\t';
+		pbuffer[len + 1] = 0;
 		s = pbuffer;
-		strcat(pbuffer, "\t");
 
 		memset(&newobject, 0, sizeof(PVIOBJECT));
 		while ( *s ) {
