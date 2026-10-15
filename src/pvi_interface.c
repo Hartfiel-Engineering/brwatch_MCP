@@ -1478,6 +1478,40 @@ static PVIOBJECT *PviReadPvarList(PVIOBJECT * object) {
 
 
 
+/* PviRead a string-valued access type of unknown length. PVI silently
+   truncates to the buffer size, so retry with a doubled buffer while the
+   result fills it completely. On success *out is a NUL-terminated malloc'd
+   buffer the caller frees; on error *out is NULL. Returns the PVI result,
+   or -1 if out of memory. */
+#define PVI_READ_ALL_INITIAL (64 * 1024)
+#define PVI_READ_ALL_MAX     (64 * 1024 * 1024)
+static int PviReadAll( DWORD linkid, int access, char **out ) {
+	size_t size = PVI_READ_ALL_INITIAL;
+	char *buf = NULL;
+	int result;
+
+	*out = NULL;
+	for( ;; ) {
+		char *nbuf = (char *)realloc( buf, size + 1 );
+		if( nbuf == NULL ) {
+			free( buf );
+			return -1;
+		}
+		buf = nbuf;
+		result = PviRead( linkid, access, NULL, 0, buf, (LONG)size );
+		if( result != 0 ) {
+			free( buf );
+			return result;
+		}
+		if( strnlen( buf, size ) < size || size >= PVI_READ_ALL_MAX )
+			break;
+		size *= 2;
+	}
+	buf[size] = 0;
+	*out = buf;
+	return 0;
+}
+
 /* read struct elements and use them as separate objects */
 static PVIOBJECT *PviReadStructElements( PVIOBJECT *object ) {
 	char *pbuffer;
@@ -1493,22 +1527,18 @@ static PVIOBJECT *PviReadStructElements( PVIOBJECT *object ) {
 	if( object->type != POBJ_PVAR && object->ex.pv.type != BR_STRUCT )
 		return NULL;
 
-	pbuffer = (char *)malloc(65535);
-
-	if( pbuffer == NULL ) {
-		AddRowToLog("PviReadStructElements:malloc(65535)", -1 );
-		return NULL;  // error
-	}
-
+	pbuffer = NULL;
 
 	memcpy( &newobject, object, sizeof(PVIOBJECT) );
 	strcpy( newobject.descriptor, "CD=\"" );
 	strcat( newobject.descriptor, object->descriptor );
 	strcat( newobject.descriptor, "\"" );
 
+	// The extern type lists every nested member, so large structs easily
+	// exceed a fixed buffer - read it whole.
 	result = PviCreate(&newobject.linkid, newobject.name, newobject.type, newobject.descriptor, PviCallback, SET_PVICALLBACK_DATA, 0, "Ev=e");
 	if( result == 0 || result == 12002 ) {
-		result = PviRead(newobject.linkid, POBJ_ACC_TYPE_EXTERN, NULL, 0, pbuffer, 65535);
+		result = PviReadAll( newobject.linkid, POBJ_ACC_TYPE_EXTERN, &pbuffer );
 	}
 	PviDelete( newobject.name );
 
@@ -2020,7 +2050,8 @@ int LoadPviObjectsFromWatchFile(T_POBJ_TYPE typefilter, char *filename) {
 
 
 /* CLI helpers for building watch-list entries by descriptor path.
-   Supports dotted struct-member paths like "gSim.Time.Time" by walking each
+   Supports dotted struct-member paths like "gSim.Time.Time", including
+   indexed arrays of structs like "gMain.Capping[0].Out", by walking each
    level with PviReadStructElements. The leaf must be a scalar (not struct,
    not array) to match the GUI's watchlist rules. */
 
@@ -2096,22 +2127,55 @@ static PVIOBJECT *TraverseStructMembers( PVIOBJECT *cpu, PVIOBJECT *first,
 		memcpy( path + cur_len + 1, p, seglen );
 		path[cur_len + 1 + seglen] = 0;
 
-		o = GetNextPviObject(TRUE);
-		while( (o = GetNextPviObject(FALSE)) != NULL ) {
-			if( o->type == POBJ_PVAR
-			    && o->ex.pv.cpu == cpu
-			    && strcmp(o->descriptor, path) == 0 )
-			{
-				child = o;
-				break;
+		/* An indexed segment ("Capping[0]") has no object of its own: match
+		   the array member by its base name. Reading the array's elements at
+		   the next level creates children named "Capping[i].x", so `path`
+		   keeps the index. */
+		{
+			char *bracket = strchr( path + cur_len + 1, '[' );
+			size_t match_len = bracket ? (size_t)(bracket - path) : strlen(path);
+			long index = bracket ? strtol( bracket + 1, NULL, 10 ) : 0;
+
+			o = GetNextPviObject(TRUE);
+			while( (o = GetNextPviObject(FALSE)) != NULL ) {
+				if( o->type == POBJ_PVAR
+				    && o->ex.pv.cpu == cpu
+				    && strlen(o->descriptor) == match_len
+				    && strncmp(o->descriptor, path, match_len) == 0 )
+				{
+					child = o;
+					break;
+				}
+			}
+			if( child && bracket ) {
+				if( child->ex.pv.dimension <= 1 ) {
+					ReportError( REPORT_ERROR, "AddPvar", "'%s' is not an array", child->descriptor );
+					return NULL;
+				}
+				if( index < 0 || index >= (long)child->ex.pv.dimension ) {
+					ReportError( REPORT_ERROR, "AddPvar", "'%s' index out of range (array has %d elements)",
+						path, (int)child->ex.pv.dimension );
+					return NULL;
+				}
+				if( !dot ) {
+					ReportError( REPORT_ERROR, "AddPvar",
+						"'%s' is an array element; watching array elements directly is not supported, "
+						"specify a member like '%s.someField'", path, path );
+					return NULL;
+				}
 			}
 		}
 		if( !child ) {
 			char siblings[512];
-			ListPvarSiblings( cpu, NULL, current->descriptor, siblings, sizeof(siblings) );
+			char parent[512];
+			/* parent is path minus this segment - unlike current->descriptor it
+			   keeps any array index ("Capping[0]"), which children are named under */
+			memcpy( parent, path, cur_len );
+			parent[cur_len] = 0;
+			ListPvarSiblings( cpu, NULL, parent, siblings, sizeof(siblings) );
 			ReportError( REPORT_ERROR, "AddPvar",
 				"Struct member '%s' not found. Siblings under '%s': %s",
-				path, current->descriptor,
+				path, parent,
 				siblings[0] ? siblings : "(none - struct empty or not browseable)" );
 			return NULL;
 		}
