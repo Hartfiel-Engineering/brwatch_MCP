@@ -7,3 +7,5 @@ obj
 build/
 brwatch_private.h
 brwatch_private.rc
+tools/brwatch-mcp/__pycache__/brwatch_mcp.cpython-314.pyc
+Wiki/brwatch.wiki/
